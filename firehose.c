@@ -297,18 +297,6 @@ static int firehose_configure(struct qdl_device *qdl, bool skip_storage_init,
 	return 0;
 }
 
-#define MIN(x, y) ({		\
-	__typeof__(x) _x = (x);	\
-	__typeof__(y) _y = (y);	\
-	_x < _y ? _x : _y;	\
-})
-
-#define ROUND_UP(x, a) ({		\
-	__typeof__(x) _x = (x);		\
-	__typeof__(a) _a = (a);		\
-	(_x + _a - 1) & ~(_a - 1);	\
-})
-
 static int firehose_erase(struct qdl_device *qdl, struct program *program)
 {
 	xmlNode *root;
