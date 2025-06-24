@@ -9,13 +9,19 @@
 
 #include "qdl.h"
 
-#define MIN(x, y) ((x) < (y) ? (x) : (y))
+#define MIN(x, y) ({		\
+	__typeof__(x) _x = (x);	\
+	__typeof__(y) _y = (y);	\
+	_x < _y ? _x : _y;	\
+})
 
 #define UX_PROGRESS_REFRESH_RATE	10
 #define UX_PROGRESS_SIZE_MAX		120
 
-static const char * const progress_hashes = "########################################################################################################################";
-static const char * const progress_dashes = "------------------------------------------------------------------------------------------------------------------------";
+static const char * const progress_hashes = "############################################################"
+					    "############################################################";
+static const char * const progress_dashes = "------------------------------------------------------------"
+					    "-----------------------------------------------------------";
 
 static unsigned int ux_width;
 static unsigned int ux_cur_line_length;
@@ -44,15 +50,15 @@ static void ux_clear_line(void)
 
 void ux_init(void)
 {
-    CONSOLE_SCREEN_BUFFER_INFO csbi;
+	CONSOLE_SCREEN_BUFFER_INFO csbi;
 	int columns;
 
-    HANDLE stdoutHandle = GetStdHandle(STD_OUTPUT_HANDLE);
+	HANDLE stdoutHandle = GetStdHandle(STD_OUTPUT_HANDLE);
 
-    if (GetConsoleScreenBufferInfo(stdoutHandle, &csbi)) {
+	if (GetConsoleScreenBufferInfo(stdoutHandle, &csbi)) {
 		columns = csbi.srWindow.Right - csbi.srWindow.Left + 1;
 		ux_width = MIN(columns, UX_PROGRESS_SIZE_MAX);
-    }
+	}
 }
 
 #else
@@ -160,9 +166,9 @@ void ux_progress(const char *fmt, unsigned int value, unsigned int max, ...)
 
 	printf("%-20.20s [%.*s%.*s] %1.2f%%%n\r", task_name,
 	       bars, progress_hashes,
-			dashes, progress_dashes,
-			percent * 100,
-			&ux_cur_line_length);
+	       dashes, progress_dashes,
+	       percent * 100,
+	       &ux_cur_line_length);
 	fflush(stdout);
 
 	gettimeofday(&last_progress_update, NULL);
