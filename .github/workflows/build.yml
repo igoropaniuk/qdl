@@ -22,20 +22,23 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxml2-dev libusb-1.0-0-dev
+          sudo apt-get install -y libxml2-dev libusb-1.0-0-dev meson ninja-build
+
+      - name: Configure
+        run: meson setup build
 
       - name: Build
-        run: make
+        run: meson compile -C build
 
       - name: Run tests
-        run: make tests
+        run: meson test -C build
 
       - name: Package
         run: |
           mkdir dist
           cp `pkg-config --variable=libdir libusb-1.0`/libusb-1.0.so.0 dist
           chmod 0644 dist/*
-          cp qdl dist
+          cp ./build/qdl dist
           patchelf --set-rpath '$ORIGIN' dist/qdl
 
       - name: Upload artifact
@@ -60,13 +63,16 @@ jobs:
 
       - name: Dependencies
         run: |
-          brew install libxml2
+          brew install libxml2 meson ninja
+
+      - name: Configure
+        run: meson setup build
 
       - name: Build
-        run: make
+        run: meson compile -C build
 
       - name: Run tests
-        run: make tests
+        run: meson test -C build
 
       - name: Package
         run: |
@@ -75,7 +81,7 @@ jobs:
           cp `pkg-config --variable=libdir libusb-1.0`/libusb-1.0.0.dylib dist
           cp `pkg-config --variable=libdir liblzma`/liblzma.5.dylib dist
           chmod 0644 dist/*
-          cp qdl dist
+          cp ./build/qdl dist
 
           if uname -a | grep -q arm64; then
             LIBUSB_DIR=/opt/homebrew/opt/libusb/lib
@@ -117,18 +123,23 @@ jobs:
           msystem: MINGW64
           install: >
             base-devel
+            git
             mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-make
-            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-ninja
             mingw-w64-x86_64-libxml2
             mingw-w64-x86_64-libusb
 
+      - name: Configure
+        run: meson setup build
+        shell: msys2 {0}
+
       - name: Build
-        run: make
+        run: meson compile -C build
         shell: msys2 {0}
 
       - name: Run tests
-        run: make tests
+        run: meson test -C build
         shell: msys2 {0}
 
       - name: Package
@@ -145,7 +156,7 @@ jobs:
           Copy-Item (Join-Path $BIN_DIR "liblzma-5.dll") $DistDir
           Copy-Item (Join-Path $BIN_DIR "libiconv-2.dll") $DistDir
 
-          Copy-Item "qdl.exe" $DistDir
+          Copy-Item "./build/qdl.exe" $DistDir
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
