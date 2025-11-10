@@ -75,6 +75,8 @@ executable('ks',
 )
 
 # Tests
-test('run_tests.sh', find_program('tests/run_tests.sh'),
-     args: ['--builddir', meson.current_build_dir()]
+test(
+  'run_tests.sh',
+  find_program('bash'),
+  args: [meson.current_source_dir() / 'tests/run_tests.sh', '--builddir', meson.current_build_dir()]
 )
