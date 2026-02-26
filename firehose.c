@@ -132,10 +132,6 @@ static int firehose_read(struct qdl_device *qdl, int timeout_ms,
 	gettimeofday(&now, NULL);
 	timeradd(&now, &delta, &timeout);
 
-	/* In simulation mode we don't expent to read and parse any responses */
-	if (qdl->dev_type == QDL_DEVICE_SIM)
-		return 0;
-
 	/*
 	 * The goal of firehose_read() is to find a response to a request among
 	 * one or more incoming messages AND to consume all incoming messages
@@ -348,13 +344,6 @@ static int firehose_try_configure(struct qdl_device *qdl, bool skip_storage_init
 	if (ret < 0)
 		return ret;
 
-	/*
-	 * In simulateion mode "remote" target can't propose different size, so
-	 * for QDL_DEVICE_SIM we just don't re-send configure packet
-	 */
-	if (qdl->dev_type == QDL_DEVICE_SIM)
-		return 0;
-
 	/* Retry if remote proposed different size */
 	if (size != qdl->max_payload_size) {
 		ret = firehose_send_configure(qdl, size, skip_storage_init, storage, &size);
@@ -369,12 +358,17 @@ static int firehose_try_configure(struct qdl_device *qdl, bool skip_storage_init
 	ux_debug("accepted max payload size: %zu\n", qdl->max_payload_size);
 
 	/*
-	 * Skip sector size probing when VIP is active: the probe read commands
-	 * are not included in the pre-built VIP digest table (the dry-run that
-	 * builds it exits before reaching this code via the SIM early-return
-	 * above), so sending them would cause a VIP hash mismatch on the device.
+	 * Skip sector size probing when VIP is active — the probe <read>
+	 * commands are not present in the VIP digest table (which was built
+	 * during a dry-run that had probing suppressed), so sending them
+	 * would cause a hash mismatch on the device.
+	 *
+	 * Also skip when the sector size is already known (e.g. pre-set by
+	 * the simulator) so that dry-run digest generation does not inject
+	 * extra probe entries into the digest table.
 	 */
-	if (storage != QDL_STORAGE_NAND && qdl->vip_data.state == VIP_DISABLED) {
+	if (storage != QDL_STORAGE_NAND && qdl->vip_data.state == VIP_DISABLED &&
+	    !qdl->sector_size) {
 		max_sector_size = sector_sizes[ARRAY_SIZE(sector_sizes) - 1];
 		buf = alloca(max_sector_size);
 
