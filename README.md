@@ -274,6 +274,22 @@ To collect only specific segments, pass a comma-separated filter:
 qdl ramdump -o ./ramdump OCIMEM,CODERAM
 ```
 
+## Sahara kickstart over a device node (qdl-ks)
+
+The `qdl-ks` helper speaks the Sahara protocol directly over a character
+device node instead of USB. It is intended for targets that expose Sahara
+through a kernel transport (e.g. MHI on Qualcomm AIC accelerators), where
+firmware images need to be served to the device on demand.
+
+Provide the device node with `-p` and one or more `id:filename` mappings
+with `-s`, one per Sahara image id the target may request:
+
+```bash
+qdl-ks -p /dev/mhi0_QAIC_SAHARA \
+       -s 1:/opt/qti-aic/firmware/fw1.bin \
+       -s 2:/opt/qti-aic/firmware/fw2.bin
+```
+
 ## Run tests
 
 To run the integration test suite for QDL, use the `meson` tool with `test`
