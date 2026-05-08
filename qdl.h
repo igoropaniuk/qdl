@@ -48,6 +48,7 @@
 enum QDL_DEVICE_TYPE {
 	QDL_DEVICE_USB,
 	QDL_DEVICE_SIM,
+	QDL_DEVICE_CHARDEV,
 };
 
 enum qdl_storage_type {
