@@ -100,6 +100,7 @@ int qdl_vip_transfer_enable(struct qdl_device *qdl, const char *vip_table_path);
 
 struct qdl_device *usb_init(void);
 struct qdl_device *sim_init(void);
+struct qdl_device *chardev_init(void);
 
 struct qdl_device_desc {
 	int vid;
