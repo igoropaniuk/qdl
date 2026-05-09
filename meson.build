@@ -21,11 +21,18 @@ inc = include_directories('.')
 
 # Windows-specific link flags
 ws2_dep = []
+setupapi_dep = []
 if host_machine.system() == 'windows'
   ws2_dep = meson.get_compiler('c').find_library('ws2_32', required : false)
+  # SetupAPI / cfgmgr32 are needed by the chardev backend to enumerate Qualcomm
+  # COM ports exposed by the official QDLoader 9008 driver.
+  setupapi_dep = [
+    meson.get_compiler('c').find_library('setupapi', required : false),
+    meson.get_compiler('c').find_library('cfgmgr32', required : false),
+  ]
 endif
 
-common_dep = [libusb_dep, libxml_dep, libzip_dep, ws2_dep]
+common_dep = [libusb_dep, libxml_dep, libzip_dep, ws2_dep, setupapi_dep]
 
 # --- version header generation ---
 conf = configuration_data()
