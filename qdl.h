@@ -58,6 +58,11 @@ enum qdl_storage_type {
 	QDL_STORAGE_SPINOR,
 };
 
+enum qdl_skipblock_mode {
+	QDL_SKIPBLOCK_NONE,
+	QDL_SKIPBLOCK_SHA256,
+};
+
 struct qdl_device {
 	enum QDL_DEVICE_TYPE dev_type;
 	int fd;
@@ -136,5 +141,6 @@ int parse_storage_address(const char *address, int *physical_partition,
 enum qdl_storage_type decode_storage(const char *storage);
 
 extern bool qdl_debug;
+extern enum qdl_skipblock_mode qdl_skipblock_mode;
 
 #endif

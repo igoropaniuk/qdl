@@ -46,6 +46,7 @@ enum {
 };
 
 bool qdl_debug;
+enum qdl_skipblock_mode qdl_skipblock_mode = QDL_SKIPBLOCK_NONE;
 
 static int detect_type(const char *verb)
 {
@@ -465,6 +466,7 @@ static void print_usage(FILE *out)
 	fprintf(out, " -T, --slot=T\t\t\tSet slot number T for multiple storage devices\n");
 	fprintf(out, " -D, --vip-table-path=T\t\tUse digest tables in the T folder for VIP\n");
 	fprintf(out, " -R, --skip-reset\t\tDo not send the reset command after flashing completes\n");
+	fprintf(out, "     --skipblock=M\t\tSkip <program> when on-device SHA-256 already matches; M: <none|sha256> (default: none)\n");
 	fprintf(out, " -h, --help\t\t\tPrint this usage info\n");
 	fprintf(out, " <program-xml>\t\txml file containing <program> or <erase> directives\n");
 	fprintf(out, " <patch-xml>\t\txml file containing <patch> directives\n");
@@ -716,6 +718,10 @@ static int qdl_flash(int argc, char **argv)
 	struct qdl_device *qdl = NULL;
 	enum QDL_DEVICE_TYPE qdl_dev_type = QDL_DEVICE_USB;
 
+	enum {
+		OPT_SKIPBLOCK = 256,
+	};
+
 	static struct option options[] = {
 		{"debug", no_argument, 0, 'd'},
 		{"version", no_argument, 0, 'v'},
@@ -731,6 +737,7 @@ static int qdl_flash(int argc, char **argv)
 		{"create-digests", required_argument, 0, 't'},
 		{"slot", required_argument, 0, 'T'},
 		{"skip-reset", no_argument, 0, 'R'},
+		{"skipblock", required_argument, 0, OPT_SKIPBLOCK},
 		{"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}
 	};
@@ -782,6 +789,14 @@ static int qdl_flash(int argc, char **argv)
 			break;
 		case 'R':
 			skip_reset = true;
+			break;
+		case OPT_SKIPBLOCK:
+			if (!strcmp(optarg, "none"))
+				qdl_skipblock_mode = QDL_SKIPBLOCK_NONE;
+			else if (!strcmp(optarg, "sha256"))
+				qdl_skipblock_mode = QDL_SKIPBLOCK_SHA256;
+			else
+				errx(1, "unknown --skipblock mode \"%s\"", optarg);
 			break;
 		case 'h':
 			print_usage(stdout);

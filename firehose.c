@@ -542,6 +542,9 @@ out:
 	return ret == FIREHOSE_ACK ? 0 : -1;
 }
 
+static int firehose_query_sha256(struct qdl_device *qdl, struct firehose_op *op,
+				 uint8_t digest[SHA256_DIGEST_LENGTH]);
+
 static int firehose_program(struct qdl_device *qdl, struct firehose_op *program)
 {
 	unsigned int num_sectors;
@@ -596,6 +599,77 @@ static int firehose_program(struct qdl_device *qdl, struct firehose_op *program)
 	if (!buf) {
 		ux_err("failed to allocate sector buffer\n");
 		goto err_close_fd;
+	}
+
+	/*
+	 * --skipblock=sha256: compare the SHA-256 of the bytes we would write
+	 * against the digest the device computes for the target region; if
+	 * they match, skip the <program> entirely.
+	 *
+	 * Restricted to non-sparse, non-NAND programs with VIP disabled:
+	 *   - Sparse chunks would each need their own digest; v1 keeps them on
+	 *     the normal program path.
+	 *   - NAND has spare/OOB bytes whose semantics differ across
+	 *     programmers.
+	 *   - <getsha256digest> is not part of pre-built VIP digest tables.
+	 */
+	if (qdl_skipblock_mode == QDL_SKIPBLOCK_SHA256 &&
+	    !program->sparse &&
+	    !program->is_nand &&
+	    qdl->vip_data.state == VIP_DISABLED) {
+		uint8_t local_digest[SHA256_DIGEST_LENGTH];
+		uint8_t device_digest[SHA256_DIGEST_LENGTH];
+		size_t total = (size_t)num_sectors * sector_size;
+		size_t hashed = 0;
+		SHA2_CTX ctx;
+		ssize_t hn;
+
+		SHA256Init(&ctx);
+		qdl_file_seek(&file, (off_t)program->file_offset * sector_size, SEEK_SET);
+
+		while (hashed < total) {
+			size_t want = MIN(qdl->max_payload_size, total - hashed);
+
+			hn = qdl_file_read(&file, buf, want);
+			if (hn < 0) {
+				hashed = SIZE_MAX;
+				break;
+			}
+			if (hn > 0)
+				SHA256Update(&ctx, buf, hn);
+			if ((size_t)hn < want) {
+				size_t pad = want - hn;
+
+				memset(buf, 0, pad);
+				SHA256Update(&ctx, buf, pad);
+			}
+			hashed += want;
+		}
+
+		if (hashed == total) {
+			struct firehose_op digest_op = {
+				.type = FIREHOSE_OP_GET_SHA256_DIGEST,
+				.sector_size = sector_size,
+				.num_sectors = num_sectors,
+				.partition = program->partition,
+				.start_sector = program->start_sector,
+			};
+
+			SHA256Final(local_digest, &ctx);
+
+			if (firehose_query_sha256(qdl, &digest_op, device_digest) == 0 &&
+			    !memcmp(local_digest, device_digest, SHA256_DIGEST_LENGTH)) {
+				ux_info("skipped \"%s\" (sha256 match)\n",
+					program->label);
+				free(buf);
+				qdl_file_close(&file);
+				return 0;
+			}
+		}
+
+		/* Mismatch, query failed, or read error - fall through to
+		 * normal program; the file pointer is restored below.
+		 */
 	}
 
 	doc = xmlNewDoc((xmlChar *)"1.0");
