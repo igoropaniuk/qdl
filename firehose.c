@@ -872,15 +872,20 @@ static int firehose_read_op(struct qdl_device *qdl, struct firehose_op *op)
 	return ret;
 }
 
-static int firehose_getsha256digest(struct qdl_device *qdl, struct firehose_op *op)
+/*
+ * Issue a <getsha256digest> request and fill the caller-supplied digest
+ * buffer on success. Returns 0 on success, -1 on failure (digest is
+ * undefined). Does not emit anything to stdout - callers that want to
+ * surface the digest format it themselves.
+ */
+static int firehose_query_sha256(struct qdl_device *qdl, struct firehose_op *op,
+				 uint8_t digest[SHA256_DIGEST_LENGTH])
 {
 	struct firehose_sha256_result result = { 0 };
 	unsigned int sector_size;
 	xmlNode *root;
 	xmlNode *node;
 	xmlDoc *doc;
-	char hex[SHA256_DIGEST_STRING_LENGTH];
-	size_t i;
 	int ret;
 
 	sector_size = op->sector_size ? : qdl->sector_size;
@@ -905,31 +910,45 @@ static int firehose_getsha256digest(struct qdl_device *qdl, struct firehose_op *
 
 	ret = firehose_read(qdl, 30000, firehose_sha256_parser, &result);
 	if (ret != FIREHOSE_ACK) {
-		ux_err("getsha256digest failed for %s+0x%x\n",
-		       op->start_sector, op->num_sectors);
 		ret = -1;
 		goto out;
 	}
 
 	if (!result.valid) {
-		ux_err("getsha256digest returned no digest for %s+0x%x\n",
-		       op->start_sector, op->num_sectors);
 		ret = -1;
 		goto out;
 	}
 
-	for (i = 0; i < SHA256_DIGEST_LENGTH; i++)
-		snprintf(hex + i * 2, 3, "%02x", result.digest[i]);
-	hex[SHA256_DIGEST_STRING_LENGTH - 1] = '\0';
-
-	printf("%s\n", hex);
-	fflush(stdout);
-
+	memcpy(digest, result.digest, SHA256_DIGEST_LENGTH);
 	ret = 0;
 
 out:
 	xmlFreeDoc(doc);
 	return ret;
+}
+
+static int firehose_getsha256digest(struct qdl_device *qdl, struct firehose_op *op)
+{
+	uint8_t digest[SHA256_DIGEST_LENGTH];
+	char hex[SHA256_DIGEST_STRING_LENGTH];
+	size_t i;
+	int ret;
+
+	ret = firehose_query_sha256(qdl, op, digest);
+	if (ret < 0) {
+		ux_err("getsha256digest failed for %s+0x%x\n",
+		       op->start_sector, op->num_sectors);
+		return ret;
+	}
+
+	for (i = 0; i < SHA256_DIGEST_LENGTH; i++)
+		snprintf(hex + i * 2, 3, "%02x", digest[i]);
+	hex[SHA256_DIGEST_STRING_LENGTH - 1] = '\0';
+
+	printf("%s\n", hex);
+	fflush(stdout);
+
+	return 0;
 }
 
 static int firehose_apply_patch(struct qdl_device *qdl, struct firehose_op *patch)
