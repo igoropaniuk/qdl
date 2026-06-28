@@ -653,6 +653,15 @@ static int firehose_getsha256digest(struct qdl_device *qdl, struct firehose_op *
  */
 #define SKIPBLOCK_CHUNK_BYTES (512ULL * 1024 * 1024)	/* 512 MiB */
 
+/*
+ * Standard SPI-NOR sector-erase granularity. The Firehose <program>
+ * handler erases at this granularity before writing, so skipping a
+ * <program> on NOR is only safe when the whole enclosing 64 KiB erase
+ * block already matches its post-<program> contents (see
+ * firehose_skipblock_erase_size() and firehose_region_local_digest()).
+ */
+#define SPINOR_ERASE_BLOCK_BYTES (64ULL * 1024)		/* 64 KiB */
+
 static bool firehose_skipblock_enabled(struct qdl_device *qdl,
 				       struct firehose_op *program)
 {
@@ -663,17 +672,69 @@ static bool firehose_skipblock_enabled(struct qdl_device *qdl,
 }
 
 /*
+ * Erase-block size, in bytes, the skipblock fast-path must verify in full
+ * before skipping a <program>. Non-zero only for storage where <program>
+ * implicitly erases more than the written sectors: on SPI-NOR a <program>
+ * erases the enclosing 64 KiB sector, so a payload-only digest match does
+ * not prove the surrounding bytes of the block are in the erased (0xFF)
+ * state the normal flow would leave - skipping on a payload-only match
+ * could leave stale data in a shared erase block and corrupt the boot
+ * chain. Returns 0 for eMMC/UFS/NVMe, where <program> touches only the
+ * written sectors and the legacy payload-only digest is sufficient.
+ */
+static size_t firehose_skipblock_erase_size(struct qdl_device *qdl)
+{
+	if (qdl->current_storage_type == QDL_STORAGE_SPINOR)
+		return SPINOR_ERASE_BLOCK_BYTES;
+
+	return 0;
+}
+
+/*
+ * Feed @len bytes of the constant @fill into the running SHA-256 @ctx
+ * using @buf (size qdl->max_payload_size) as a scratch staging buffer.
+ */
+static void firehose_sha256_update_fill(struct qdl_device *qdl, SHA2_CTX *ctx,
+					void *buf, uint8_t fill, size_t len)
+{
+	if (!len)
+		return;
+
+	memset(buf, fill, MIN(qdl->max_payload_size, len));
+	while (len) {
+		size_t chunk = MIN(qdl->max_payload_size, len);
+
+		SHA256Update(ctx, buf, chunk);
+		len -= chunk;
+	}
+}
+
+/*
  * SHA-256 the @region_bytes of @file starting at @file_byte_off into @out.
  * Mirrors the program path's trailing zero-pad (see the memset() of the
  * residue in firehose_program_raw_region()): bytes past EOF are hashed as
  * zeros so a chunk that is short, or read from a non-zero file offset,
- * still produces a digest that can match flash. @buf is caller-owned
- * scratch of qdl->max_payload_size. Returns -1 on read error.
+ * still produces a digest that can match flash.
+ *
+ * For erase-block-aligned verification (@lead_bytes / @trail_bytes > 0, set
+ * only on NOR/SPINOR) the payload is bracketed with the erased pattern
+ * (0xFF): a real <program> erases the whole enclosing erase block before
+ * writing the partition's sectors, so the bytes outside the partition but
+ * inside the block are left at 0xFF. Hashing
+ *     [0xFF lead-in][payload (file + zero pad)][0xFF trail]
+ * therefore reproduces exactly the post-<program> block contents, which is
+ * what the device digest over the aligned region must equal for the chunk
+ * to be safely skippable.
+ *
+ * @buf is caller-owned scratch of qdl->max_payload_size. Returns -1 on read
+ * error.
  */
 static int firehose_region_local_digest(struct qdl_device *qdl,
 					struct qdl_file *file,
 					off_t file_byte_off,
 					size_t region_bytes,
+					size_t lead_bytes,
+					size_t trail_bytes,
 					void *buf,
 					uint8_t out[SHA256_DIGEST_LENGTH])
 {
@@ -682,6 +743,10 @@ static int firehose_region_local_digest(struct qdl_device *qdl,
 	ssize_t hn;
 
 	SHA256Init(&ctx);
+
+	/* Lead-in bytes of the erase block left erased (0xFF) by <program>. */
+	firehose_sha256_update_fill(qdl, &ctx, buf, 0xFF, lead_bytes);
+
 	qdl_file_seek(file, file_byte_off, SEEK_SET);
 
 	while (hashed < region_bytes) {
@@ -698,15 +763,12 @@ static int firehose_region_local_digest(struct qdl_device *qdl,
 			break;	/* short read == EOF, remainder is zero-pad */
 	}
 
-	if (hashed < region_bytes) {
-		memset(buf, 0, qdl->max_payload_size);
-		while (hashed < region_bytes) {
-			size_t pad = MIN(qdl->max_payload_size, region_bytes - hashed);
+	if (hashed < region_bytes)
+		firehose_sha256_update_fill(qdl, &ctx, buf, 0x00,
+					    region_bytes - hashed);
 
-			SHA256Update(&ctx, buf, pad);
-			hashed += pad;
-		}
-	}
+	/* Trailing bytes of the erase block are likewise left erased. */
+	firehose_sha256_update_fill(qdl, &ctx, buf, 0xFF, trail_bytes);
 
 	SHA256Final(out, &ctx);
 	return 0;
@@ -856,6 +918,23 @@ static int firehose_program_skipblock(struct qdl_device *qdl,
 		char start_sector[24];
 		char chunk_id[32];
 		bool match = false;
+		/*
+		 * Erase-block-aligned digest region. On NOR/SPINOR
+		 * (firehose_skipblock_erase_size() > 0) a <program> erases the
+		 * whole enclosing erase block, so a chunk can only be skipped
+		 * when the entire aligned block - not just the partition
+		 * payload - already equals its post-<program> contents.
+		 * lead_bytes / trail_bytes are the erased (0xFF) bytes that
+		 * bracket the payload inside the block; digest_* address the
+		 * expanded region sent to <getsha256digest>.
+		 */
+		size_t block = firehose_skipblock_erase_size(qdl);
+		size_t lead_bytes = 0;
+		size_t trail_bytes = 0;
+		const char *digest_start;
+		char digest_start_buf[24];
+		unsigned int digest_sectors = chunk_sectors;
+		bool block_aligned = false;
 
 		/*
 		 * start_sector is a firehose expression that may be symbolic
@@ -872,6 +951,48 @@ static int firehose_program_skipblock(struct qdl_device *qdl,
 			chunk_start = start_sector;
 		}
 
+		digest_start = chunk_start;
+
+		/*
+		 * Expand the digested region to the enclosing erase block(s).
+		 * Requires a numeric start sector (the first chunk's start may
+		 * be symbolic) and a block size that is a whole number of
+		 * sectors; otherwise fall back to the payload-only digest,
+		 * which is correct for storage where <program> does not erase
+		 * beyond the written sectors (eMMC/UFS/NVMe).
+		 */
+		if (block && (block % sector_size) == 0 &&
+		    (off != 0 || strtoull(program->start_sector, NULL, 0) ||
+		     program->start_sector[0] == '0')) {
+			char *end;
+			unsigned long long abs_start =
+				strtoull(chunk_start, NULL, 0);
+
+			/* Confirm chunk_start is a plain decimal number. */
+			strtoull(chunk_start, &end, 0);
+			if (*end == '\0') {
+				unsigned long long block_sectors =
+					block / sector_size;
+				unsigned long long lead =
+					abs_start % block_sectors;
+				unsigned long long aligned_start =
+					abs_start - lead;
+				unsigned long long aligned_sectors =
+					ROUND_UP(lead + chunk_sectors,
+						 block_sectors);
+
+				lead_bytes = (size_t)lead * sector_size;
+				trail_bytes = (size_t)(aligned_sectors - lead -
+						       chunk_sectors) * sector_size;
+				digest_sectors = (unsigned int)aligned_sectors;
+				snprintf(digest_start_buf,
+					 sizeof(digest_start_buf), "%llu",
+					 aligned_start);
+				digest_start = digest_start_buf;
+				block_aligned = true;
+			}
+		}
+
 		/*
 		 * A region that fits in a single chunk keeps the original
 		 * unqualified wording; only split regions name the chunk.
@@ -882,18 +1003,20 @@ static int firehose_program_skipblock(struct qdl_device *qdl,
 		else
 			chunk_id[0] = '\0';
 
-		ux_info("hashing \"%s\"%s locally (%zu KiB)...\n",
-			program->label, chunk_id, region_bytes >> 10);
+		ux_info("hashing \"%s\"%s locally (%zu KiB%s)...\n",
+			program->label, chunk_id, region_bytes >> 10,
+			block_aligned ? ", erase-block aligned" : "");
 
 		if (firehose_region_local_digest(qdl, file, file_byte_off,
-						 region_bytes, buf,
+						 region_bytes, lead_bytes,
+						 trail_bytes, buf,
 						 local_digest) == 0) {
 			digest_op = (struct firehose_op){
 				.type = FIREHOSE_OP_GET_SHA256_DIGEST,
 				.sector_size = sector_size,
-				.num_sectors = chunk_sectors,
+				.num_sectors = digest_sectors,
 				.partition = program->partition,
-				.start_sector = chunk_start,
+				.start_sector = digest_start,
 			};
 
 			ux_info("requesting flash digest for \"%s\"%s...\n",
