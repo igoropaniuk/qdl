@@ -269,7 +269,8 @@ static int firehose_read(struct qdl_device *qdl, int timeout_ms,
 	 * consumption of incoming data.
 	 */
 	for (;;) {
-		n = qdl_read(qdl, buf, sizeof(buf), 100);
+		/* Reserve one byte for the NUL terminator written below. */
+		n = qdl_read(qdl, buf, sizeof(buf) - 1, 100);
 
 		/* Timeout after seeing a response, we're done waiting for logs */
 		if (n == -ETIMEDOUT && resp >= 0)
@@ -396,7 +397,6 @@ static int firehose_vip_send_table(struct qdl_device *qdl)
 
 static int firehose_write(struct qdl_device *qdl, xmlDoc *doc)
 {
-	int saved_errno;
 	xmlChar *s;
 	int len;
 	int ret;
@@ -404,8 +404,10 @@ static int firehose_write(struct qdl_device *qdl, xmlDoc *doc)
 	xmlDocDumpMemory(doc, &s, &len);
 
 	ret = firehose_vip_send_table(qdl);
-	if (ret)
+	if (ret) {
+		xmlFree(s);
 		return -1;
+	}
 
 	vip_gen_chunk_init(qdl);
 
@@ -413,23 +415,24 @@ static int firehose_write(struct qdl_device *qdl, xmlDoc *doc)
 		ux_debug("FIREHOSE WRITE: %s\n", s);
 		vip_gen_chunk_update(qdl, s, len);
 		ret = qdl_write(qdl, s, len, 1000);
-		saved_errno = errno;
 
 		/*
-		 * db410c sometimes sense a <response> followed by <log>
+		 * db410c sometimes sends a <response> followed by <log>
 		 * entries and won't accept write commands until these are
 		 * drained, so attempt to read any pending data and then retry
-		 * the write.
+		 * the write. The qdl_write() backends report the timeout via
+		 * the return value, not errno, so key the retry on that.
 		 */
-		if (ret < 0 && errno == ETIMEDOUT) {
+		if (ret == -ETIMEDOUT) {
 			firehose_read(qdl, 100, firehose_generic_parser, NULL);
-		} else {
-			break;
+			continue;
 		}
+
+		break;
 	}
 	xmlFree(s);
 	vip_gen_chunk_store(qdl);
-	return ret < 0 ? -saved_errno : 0;
+	return ret < 0 ? ret : 0;
 }
 
 /**
@@ -455,6 +458,17 @@ static int firehose_configure_response_parser(xmlNode *node, void *data,
 		return -EAGAIN;
 	}
 
+	/*
+	 * A configure NAK means the device rejected the request (e.g. storage
+	 * init failure). Report it as an error instead of silently treating it
+	 * as a successful ACK.
+	 */
+	if (!xmlStrcmp(value, (xmlChar *)"NAK")) {
+		ux_err("configure request rejected by device (NAK)\n");
+		xmlFree(value);
+		return -EINVAL;
+	}
+
 	payload = xmlGetProp(node, (xmlChar *)"MaxPayloadSizeToTargetInBytes");
 	if (!payload) {
 		xmlFree(value);
@@ -470,8 +484,10 @@ static int firehose_configure_response_parser(xmlNode *node, void *data,
 	 */
 	if (!xmlStrcmp(value, (xmlChar *)"ACK")) {
 		payload = xmlGetProp(node, (xmlChar *)"MaxPayloadSizeToTargetInBytesSupported");
-		if (!payload)
+		if (!payload) {
+			xmlFree(value);
 			return -EINVAL;
+		}
 
 		max_size = strtoul((char *)payload, NULL, 10);
 		xmlFree(payload);
@@ -761,6 +777,7 @@ static int firehose_program_raw_region(struct qdl_device *qdl,
 	ret = firehose_read(qdl, 10000, firehose_generic_parser, NULL);
 	if (ret) {
 		ux_err("failed to setup programming\n");
+		ret = -1;
 		goto out;
 	}
 
@@ -969,6 +986,11 @@ static int firehose_program(struct qdl_device *qdl, struct firehose_op *program)
 	num_sectors = program->num_sectors;
 	sector_size = program->sector_size ? : qdl->sector_size;
 
+	if (!sector_size) {
+		ux_err("unable to determine sector size for %s\n", program->filename);
+		goto err_close_fd;
+	}
+
 	if (!program->sparse) {
 		num_sectors = (qdl_file_getsize(&file) + sector_size - 1) / sector_size;
 
@@ -1081,8 +1103,10 @@ static int firehose_program(struct qdl_device *qdl, struct firehose_op *program)
 		vip_gen_chunk_update(qdl, buf, chunk_size * sector_size);
 
 		ret = firehose_vip_send_table(qdl);
-		if (ret)
-			return -1;
+		if (ret) {
+			ret = -1;
+			goto err_free_doc;
+		}
 
 		n = qdl_write(qdl, buf, chunk_size * sector_size, zlp_timeout);
 		if (n < 0) {
@@ -1090,7 +1114,7 @@ static int firehose_program(struct qdl_device *qdl, struct firehose_op *program)
 			ret = firehose_read(qdl, 30000, firehose_generic_parser, NULL);
 			if (ret)
 				ux_err("flashing of chunk failed\n");
-
+			ret = -1;
 			goto err_free_doc;
 		}
 
@@ -1111,7 +1135,11 @@ static int firehose_program(struct qdl_device *qdl, struct firehose_op *program)
 	ret = firehose_read(qdl, 120000, firehose_generic_parser, NULL);
 	if (ret != FIREHOSE_ACK) {
 		ux_err("flashing of %s failed\n", program->label);
-	} else if (t) {
+		ret = -1;
+		goto err_free_doc;
+	}
+
+	if (t) {
 		ux_info("flashed \"%s\" successfully at %lukB/s\n",
 			program->label,
 			(unsigned long)sector_size * num_sectors / t / 1024);
@@ -1162,6 +1190,12 @@ static int firehose_issue_read(struct qdl_device *qdl, struct firehose_op *read_
 	xmlDocSetRootElement(doc, root);
 
 	sector_size = read_op->sector_size ? : qdl->sector_size;
+	if (!sector_size) {
+		ux_err("unable to determine sector size for read operation\n");
+		free(buf);
+		xmlFreeDoc(doc);
+		return -1;
+	}
 
 	node = xmlNewChild(root, NULL, (xmlChar *)"read", NULL);
 	xml_setpropf(node, "SECTOR_SIZE_IN_BYTES", "%d", sector_size);
@@ -1184,6 +1218,7 @@ static int firehose_issue_read(struct qdl_device *qdl, struct firehose_op *read_
 	if (ret) {
 		if (!quiet)
 			ux_err("failed to setup reading operation\n");
+		ret = -1;
 		goto out;
 	}
 
@@ -1254,6 +1289,7 @@ static int firehose_issue_read(struct qdl_device *qdl, struct firehose_op *read_
 	ret = firehose_read(qdl, 10000, firehose_generic_parser, NULL);
 	if (ret) {
 		ux_err("read operation failed\n");
+		ret = -1;
 		goto out;
 	}
 
@@ -1613,7 +1649,7 @@ static int firehose_detect_and_configure(struct qdl_device *qdl,
 			qdl->vip_data.state = VIP_DISABLED;
 		}
 
-		ret = firehose_try_configure(qdl, false, storage);
+		ret = firehose_try_configure(qdl, skip_storage_init, storage);
 		if (ret != FIREHOSE_ACK) {
 			ux_err("configure request failed\n");
 			return -1;
