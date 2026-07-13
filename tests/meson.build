@@ -90,6 +90,23 @@ if cmocka_dep.found()
     env: ['CMOCKA_MESSAGE_OUTPUT=TAP'],
   )
 
+  test_sha2 = executable('test_sha2',
+    sources : [
+      'test_sha2.c',
+      sha2_src,
+    ],
+    dependencies : common_dep + [cmocka_dep],
+    include_directories : inc,
+  )
+
+  test(
+    'sha256 known answers',
+    test_sha2,
+    suite: 'unit',
+    protocol: 'tap',
+    env: ['CMOCKA_MESSAGE_OUTPUT=TAP'],
+  )
+
   test_program_load_xml = executable('test_program_load_xml',
     sources : [
       'test_program_load_xml.c',
