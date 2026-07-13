@@ -151,6 +151,15 @@ static int usb_try_open(libusb_device *dev, struct qdl_device_usb *qdl, const ch
 		    ifc->bInterfaceProtocol != 17)
 			continue;
 
+		/*
+		 * A matching interface is only usable if it exposes both a bulk
+		 * IN and a bulk OUT endpoint with a non-zero max packet size.
+		 * Without this check a malformed descriptor leads to a division
+		 * by zero (out_size == 0) or transfers on endpoint -1.
+		 */
+		if (in < 0 || out < 0 || !in_size || !out_size)
+			continue;
+
 		ret = libusb_open(dev, &handle);
 		if (ret < 0) {
 			warnx("unable to open USB device");
