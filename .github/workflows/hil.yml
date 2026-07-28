@@ -20,6 +20,10 @@ on:
         description: 'Windows: JSON list of board config names ($HOME/hil/<name>.env under MSYS2), or ["default"] for the runner .env'
         required: false
         default: ''
+      meson_args:
+        description: 'Extra meson setup arguments, e.g. -Dzip-container=disabled to sweep an optional feature'
+        required: false
+        default: ''
   schedule:
     - cron: '0 3 * * *'
 
@@ -48,7 +52,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure
-        run: meson setup build
+        run: meson setup build ${{ inputs.meson_args }}
 
       - name: Build
         run: meson compile -C build
@@ -108,7 +112,7 @@ jobs:
             zip
 
       - name: Configure
-        run: meson setup build
+        run: meson setup build ${{ inputs.meson_args }}
 
       - name: Build
         run: meson compile -C build
