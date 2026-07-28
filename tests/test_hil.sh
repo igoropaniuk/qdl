@@ -190,6 +190,28 @@ sha256_file() {
     fi
 }
 
+# qdl may be built without zip container support (-Dzip-container=disabled);
+# probe for it so zip-dependent steps skip instead of failing. The probe
+# invocation fails in both configurations, but only a zip-less build
+# reports the missing feature before looking at its arguments.
+qdl_has_zip() {
+    ! "${QEXE}" create-zip "${HIL_TMPDIR}/zip-probe.zip" /nonexistent 2>&1 |
+        grep -q "zip-container support"
+}
+
+# Skip a step that cannot run without zip container support. Pass the
+# input file when the step's input decides (a .zip needs the feature,
+# anything else does not); no argument means the step always needs it.
+need_zip_support() {
+    local input="${1-}"
+
+    [[ -z "${input}" || "${input}" == *.zip ]] || return 0
+    qdl_has_zip && return 0
+
+    echo "qdl was built without zip-container support" >&2
+    exit ${SKIP}
+}
+
 # --- step implementations -------------------------------------------------
 
 # a) Flash the whole build.
@@ -201,6 +223,7 @@ t_flash_full() {
         [[ ${#raws[@]} -gt 0 ]] || { echo "no rawprogram*.xml in ${BUILDDIR}" >&2; exit ${SKIP}; }
         qdl_noreset "${PROGRAMMER}" "${raws[@]}" "${patches[@]}"
     else
+        need_zip_support "${BUILD}"
         qdl_noreset flash "${BUILD}"
     fi
 }
@@ -318,6 +341,7 @@ t_create_zip() {
         echo "set QDL_HIL_CONTENTS to test create-zip" >&2
         exit ${SKIP}
     }
+    need_zip_support
     local zip="${HIL_TMPDIR}/hil-created.zip"
     trap 'rm -f "${zip}"' RETURN
     "${QEXE}" create-zip "${zip}" "${QDL_HIL_CONTENTS}" ||
@@ -332,6 +356,7 @@ t_sparse_flash() {
         echo "set QDL_HIL_SPARSE to a flashmap/contents/zip using sparse images" >&2
         exit ${SKIP}
     }
+    need_zip_support "${QDL_HIL_SPARSE}"
     qdl_noreset flash "${QDL_HIL_SPARSE}"
 }
 
