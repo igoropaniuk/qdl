@@ -63,6 +63,16 @@ meson setup build
 meson compile -C build
 ```
 
+### Build options
+
+libzip is only needed for zip container support - flashing directly from
+zip archives and the `create-zip` subcommand. To build a leaner QDL
+without it, disable the `zip-container` feature:
+
+```bash
+meson setup build -Dzip-container=disabled
+```
+
 ## Use QDL
 
 ### EDL mode
