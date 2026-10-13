@@ -250,6 +250,28 @@ enum ux_style {
 void ux_set_color_mode(enum ux_color_mode mode);
 const char *ux_style(FILE *fp, enum ux_style style);
 
+/* Subsystem a message comes from, printed as a "NAME: " prefix */
+enum ux_tag {
+	UX_TAG_NONE,
+	UX_TAG_SAHARA,
+	UX_TAG_FIREHOSE,	/* XML commands and responses */
+	UX_TAG_FIREHOSE_BINARY,	/* raw data phase of <program> and <read> */
+	UX_TAG_VIP,
+	UX_TAG_USB,
+	UX_TAG_SPARSE,
+	UX_TAG_FLASHMAP,
+	UX_TAG_CONTENTS,
+	UX_TAG_SIM,
+	UX_TAG_QUD,
+	UX_TAG_MINIDUMP,
+};
+
+void ux_err_tag(enum ux_tag tag, const char *fmt, ...);
+void ux_warn_tag(enum ux_tag tag, const char *fmt, ...);
+void ux_info_tag(enum ux_tag tag, const char *fmt, ...);
+void ux_log_tag(enum ux_tag tag, const char *fmt, ...);
+void ux_debug_tag(enum ux_tag tag, const char *fmt, ...);
+
 int parse_storage_address(const char *address, int *physical_partition,
 			  unsigned int *start_sector, unsigned int *num_sectors,
 			  char **gpt_partition);
