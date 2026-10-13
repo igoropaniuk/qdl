@@ -933,6 +933,9 @@ int main(int argc, char **argv)
 
 	ux_set_progname(argv[0]);
 
+	if (qdl_take_color_option(&argc, argv) < 0)
+		return 1;
+
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "list"))
 			return qdl_list(stdout);
