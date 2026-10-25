@@ -18,6 +18,14 @@ on:
         description: 'Linux: JSON list of board config names (~/hil/<name>.env on the runner), or ["default"] for the runner .env'
         required: false
         default: ''
+      unix_backend:
+        description: 'TEST ONLY: --backend for Linux/macOS (empty = auto)'
+        required: false
+        default: ''
+      windows_backend:
+        description: 'TEST ONLY: --backend for Windows (empty = auto)'
+        required: false
+        default: ''
       windows_boards:
         description: 'Windows: JSON list of board config names ($HOME/hil/<name>.env under MSYS2), or ["default"] for the runner .env'
         required: false
@@ -61,6 +69,8 @@ jobs:
       - name: Run HIL suite
         env:
           BOARD: ${{ matrix.board }}
+          QDL_HIL_DEBUG: '1'
+          QDL_HIL_BACKEND: ${{ inputs.unix_backend }}
         run: |
           if [ "$BOARD" != "default" ]; then
             set -a; . "$HOME/hil/$BOARD.env"; set +a
@@ -123,6 +133,8 @@ jobs:
       - name: Run HIL suite
         env:
           BOARD: ${{ matrix.board }}
+          QDL_HIL_DEBUG: '1'
+          QDL_HIL_BACKEND: ${{ inputs.windows_backend }}
         run: |
           if [ "$BOARD" != "default" ]; then
             set -a; . "$HOME/hil/$BOARD.env"; set +a

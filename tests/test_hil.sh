@@ -167,6 +167,7 @@ QDLDBG=()
 # Common qdl prefix. -R suppresses the reset everywhere but the final step.
 COMMON=( "${QDLDBG[@]}" -s "${STORAGE}" )
 [[ -n "${SERIAL}" ]] && COMMON+=( -S "${SERIAL}" )
+[[ -n "${QDL_HIL_BACKEND}" ]] && COMMON+=( --backend="${QDL_HIL_BACKEND}" )
 
 qdl_noreset() { "${QEXE}" "${COMMON[@]}" -R "$@"; }
 qdl_reset()   { "${QEXE}" "${COMMON[@]}" "$@"; }
