@@ -58,6 +58,23 @@ jobs:
       - name: Build
         run: meson compile -C build
 
+      - name: TEST ONLY re-authorize USB devices
+        if: matrix.os == 'linux'
+        shell: bash {0}
+        run: |
+          for d in /sys/bus/usb/devices/*; do
+            [ -f "$d/idVendor" ] || continue
+            [ "$(cat $d/idVendor)" = 05c6 ] || continue
+            echo "USBDEV $d $(cat $d/idVendor):$(cat $d/idProduct) authorized=$(cat $d/authorized) product=$(cat $d/product 2>&1 | head -c 120)"
+          done
+          for a in /sys/bus/usb/devices/*/authorized; do
+            if [ "$(cat "$a" 2>/dev/null)" = 0 ]; then
+              echo "REAUTH $a"
+              echo 1 | sudo -n tee "$a" >/dev/null || echo "REAUTH-FAILED $a"
+            fi
+          done
+          exit 0
+
       - name: Run HIL suite
         env:
           BOARD: ${{ matrix.board }}
