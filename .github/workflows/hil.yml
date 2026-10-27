@@ -67,6 +67,16 @@ jobs:
           fi
           meson test -C build --suite "${QDL_HIL_SUITE:-hil}" --print-errorlogs
 
+      - name: TEST ONLY nbdkit getstorageinfo probe
+        if: ${{ !cancelled() && matrix.board != 'rb3gen2-sec' }}
+        env:
+          BOARD: ${{ matrix.board }}
+        run: |
+          if [ "$BOARD" != "default" ]; then
+            set -a; . "$HOME/hil/$BOARD.env"; set +a
+          fi
+          tests/hil_nbdkit_probe.sh
+
       - name: Upload logs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
