@@ -1,6 +1,21 @@
 #!/bin/bash
 # pr347 nbdkit getstorageinfo probe: probe.sh <storage> <dir> <programmer> "<luns>"
 STORAGE=$1; DIR=$2; PROG=$3; LUNS=$4
+SER=$(echo "$LAVA_BOARD_ID" | sed -n 's/.*SN:\([0-9A-Fa-f]*\).*/\1/p'); [ -n "$SER" ] || SER=$LAVA_BOARD_ID
+# The nbdkit plugin has no serial option: it opens the FIRST EDL device it
+# sees. Only run it when this container can see exactly one Qualcomm USB
+# device, exactly one EDL device is listed, and its serial is this board's.
+isolated() {
+	echo "--- isolation check (expected serial '$SER')"
+	lsusb 2>&1 | sed 's/^/usb: /'
+	QC=$(lsusb 2>/dev/null | grep -c -i ' 05c6:' || true)
+	LIST=$(/qdl/build/qdl list 2>&1)
+	echo "$LIST" | sed 's/^/qdl-list: /'
+	N=$(echo "$LIST" | grep -c -i '^05c6:' || true)
+	M=$(echo "$LIST" | awk -F'\t' -v s="$SER" 'tolower($1) ~ /^05c6:/ && tolower($2) == tolower(s)' | wc -l)
+	echo "ISOLATION qualcomm_usb=$QC edl_listed=$N serial_match=$M"
+	[ -n "$SER" ] && [ "$QC" = 1 ] && [ "$N" = 1 ] && [ "$M" = 1 ]
+}
 apt-get install -y -qq --no-install-recommends nbdkit nbdkit-plugin-dev libnbd-bin >/dev/null 2>&1 || true
 if ! command -v nbdkit >/dev/null || ! command -v nbdinfo >/dev/null || ! pkg-config --exists nbdkit; then
 	echo "nbdkit/nbdinfo/headers unavailable"; lava-test-case pr347-nbdkit-deps --result fail; exit 0
@@ -21,7 +36,11 @@ for lun in $LUNS; do
 		for i in $(seq 1 60); do lsusb -d 05c6:9008 >/dev/null && break; sleep 2; done
 	fi
 	first=0
-	lsusb -d 05c6:9008
+	if ! isolated; then
+		echo "PR347_PROBE lun=$lun SKIPPED (device not isolated)"
+		lava-test-case pr347-nbdkit-lun$lun --result skip
+		break
+	fi
 	RC=0
 	out=$(cd "$DIR" && timeout 180 nbdkit -U - "$PLUGIN" programmer="$DIR/$PROG" storage="$STORAGE" lun="$lun" debug=1 --run 'nbdinfo --size "$uri"' 2>&1) || RC=$?
 	echo "$out" > /tmp/nbd-lun$lun.log
