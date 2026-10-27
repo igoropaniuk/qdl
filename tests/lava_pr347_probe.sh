@@ -8,13 +8,16 @@ SER=$(echo "$LAVA_BOARD_ID" | sed -n 's/.*SN:\([0-9A-Fa-f]*\).*/\1/p'); [ -n "$S
 isolated() {
 	echo "--- isolation check (expected serial '$SER')"
 	lsusb 2>&1 | sed 's/^/usb: /'
-	QC=$(lsusb 2>/dev/null | grep -c -i ' 05c6:' || true)
+	# 05c6:9302 is the board's EPM power-measurement probe, not a SoC: it
+	# cannot enter EDL, so it does not count. Any other Qualcomm device does.
+	QC=$(lsusb 2>/dev/null | grep -i ' 05c6:' | grep -v -i ' 05c6:9302 ' | wc -l)
+	E=$(lsusb -d 05c6:9008 2>/dev/null | wc -l)
 	LIST=$(/qdl/build/qdl list 2>&1)
 	echo "$LIST" | sed 's/^/qdl-list: /'
 	N=$(echo "$LIST" | grep -c -i '^05c6:' || true)
 	M=$(echo "$LIST" | awk -F'\t' -v s="$SER" 'tolower($1) ~ /^05c6:/ && tolower($2) == tolower(s)' | wc -l)
-	echo "ISOLATION qualcomm_usb=$QC edl_listed=$N serial_match=$M"
-	[ -n "$SER" ] && [ "$QC" = 1 ] && [ "$N" = 1 ] && [ "$M" = 1 ]
+	echo "ISOLATION qualcomm_soc_usb=$QC edl_usb=$E edl_listed=$N serial_match=$M"
+	[ -n "$SER" ] && [ "$QC" = 1 ] && [ "$E" = 1 ] && [ "$N" = 1 ] && [ "$M" = 1 ]
 }
 apt-get install -y -qq --no-install-recommends nbdkit nbdkit-plugin-dev libnbd-bin >/dev/null 2>&1 || true
 if ! command -v nbdkit >/dev/null || ! command -v nbdinfo >/dev/null || ! pkg-config --exists nbdkit; then
