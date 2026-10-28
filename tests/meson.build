@@ -149,8 +149,10 @@ if cmocka_dep.found()
       env: ['CMOCKA_MESSAGE_OUTPUT=TAP'],
     )
 
-    # test_usb.c mocks libusb_bulk_transfer() and includes usb.c directly to
-    # exercise the backend's ZLP state machine without attached hardware.
+    # test_usb.c mocks libusb_bulk_transfer() and
+    # libusb_get_string_descriptor_ascii() and includes usb.c directly to
+    # exercise the backend's ZLP state machine and serial discovery
+    # without attached hardware.
     test_usb = executable('test_usb',
       sources : [
         'test_usb.c',
@@ -162,7 +164,7 @@ if cmocka_dep.found()
     )
 
     test(
-      'USB ZLP handling',
+      'USB backend',
       test_usb,
       suite: 'unit',
       protocol: 'tap',
