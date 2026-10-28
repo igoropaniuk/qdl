@@ -113,18 +113,46 @@ static int usb_enumerate_edl_devices(usb_edl_device_cb_t cb, void *data)
 #endif
 
 /*
+ * Reading a string descriptor is a live control transfer. In the window
+ * right after the device (re)enumerates, e.g. following "adb reboot edl"
+ * or while it bounces between modes, the transfer can fail with a
+ * transient error although the device is already listed. Retry a few
+ * times before giving up so a listing or serial match taken in that
+ * window does not come back empty.
+ */
+#define USB_STRING_ATTEMPTS	3
+#define USB_STRING_RETRY_US	20000
+
+static bool usb_string_error_transient(int ret)
+{
+	return ret == LIBUSB_ERROR_IO ||
+	       ret == LIBUSB_ERROR_PIPE ||
+	       ret == LIBUSB_ERROR_TIMEOUT;
+}
+
+/*
  * Read string descriptor @index as ASCII into @buf. Returns the string
  * length, LIBUSB_ERROR_NOT_FOUND if the device does not have the string,
- * or the libusb error.
+ * or the libusb error of the last attempt.
  */
 static int usb_read_string(struct libusb_device_handle *handle, uint8_t index,
 			   char *buf, size_t len)
 {
+	int attempt;
+	int ret;
+
 	if (!index)
 		return LIBUSB_ERROR_NOT_FOUND;
 
-	return libusb_get_string_descriptor_ascii(handle, index,
-						  (unsigned char *)buf, len);
+	for (attempt = 1;; attempt++) {
+		ret = libusb_get_string_descriptor_ascii(handle, index,
+							 (unsigned char *)buf, len);
+		if (ret >= 0 || attempt == USB_STRING_ATTEMPTS ||
+		    !usb_string_error_transient(ret))
+			return ret;
+
+		usleep(USB_STRING_RETRY_US);
+	}
 }
 
 /*
