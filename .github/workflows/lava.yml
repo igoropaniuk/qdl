@@ -1,0 +1,80 @@
+name: LAVA
+
+# Needs the LAVATOKEN secret and the LAVA_URL variable. Dispatch only: the
+# jobs use a lab credential, so never trigger this on pull requests.
+on:
+  workflow_dispatch:
+    inputs:
+      boards:
+        description: 'JSON list of boards to test (default: all in .github/lava)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  boards:
+    runs-on: ubuntu-24.04
+    outputs:
+      boards: ${{ steps.list.outputs.boards }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: List boards
+        id: list
+        env:
+          BOARDS: ${{ inputs.boards }}
+        run: |
+          if [ -z "$BOARDS" ]; then
+            BOARDS=$(ls .github/lava/*.yaml | grep -v hil-steps |
+                     sed 's@.*/\(.*\)\.yaml@"\1"@' | paste -sd, -)
+            BOARDS="[$BOARDS]"
+          fi
+          echo "boards=$BOARDS" >> "$GITHUB_OUTPUT"
+
+  lava:
+    needs: boards
+    strategy:
+      fail-fast: false
+      matrix:
+        board: ${{ fromJSON(needs.boards.outputs.boards) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    concurrency:
+      group: lava-${{ matrix.board }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Render LAVA job
+        id: render
+        env:
+          LAVA_URL: ${{ vars.LAVA_URL }}
+          BOARD: ${{ matrix.board }}
+          QDL_REPO: ${{ github.server_url }}/${{ github.repository }}
+          QDL_REF: ${{ github.sha }}
+        run: |
+          python3 .github/lava/render.py \
+            -D "QDL_REPO=$QDL_REPO" -D "QDL_REF=$QDL_REF" \
+            ".github/lava/$BOARD.yaml" > lava-job.yaml
+          # lava-action wants the bare host name
+          HOST=${LAVA_URL#*://}
+          echo "host=${HOST%%/*}" >> "$GITHUB_OUTPUT"
+
+      # Suite failures leave the job Incomplete; lone failed cases can be
+      # lab housekeeping (e.g. power-off), so do not fail on those.
+      - name: Run LAVA job
+        uses: foundriesio/lava-action@2392ee48130c6d99c97bb91cddb46d1fcde43f3e # v14
+        with:
+          lava_token: ${{ secrets.LAVATOKEN }}
+          lava_url: ${{ steps.render.outputs.host }}
+          job_definition: lava-job.yaml
+          wait_for_job: true
+          fail_action_on_failure: false
+          fail_action_on_incomplete: true
+          save_result_as_artifact: true
+          result_file_name: lava-results-${{ matrix.board }}
