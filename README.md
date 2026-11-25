@@ -247,6 +247,10 @@ arguments, or for generating VIP digest tables (see
 qdl --dry-run prog_firehose_ddr.elf rawprogram*.xml patch*.xml
 ```
 
+A dry run can also keep what it would have flashed: `--disk-image` writes it
+to a disk image file, ready to be copied to an SD card or eMMC (see
+[docs/disk-image.md](docs/disk-image.md)).
+
 ---
 
 ## Documentation
@@ -261,6 +265,8 @@ The less common workflows are described in separate guides under
 - [Reading and writing raw binaries](docs/raw-io.md) - `read`, `write`,
   `erase` and `sha256` on physical partitions, sector ranges and named GPT
   partitions.
+- [Creating a disk image](docs/disk-image.md) - writing a build into an
+  image file for an SD card or eMMC with `--disk-image`, without a device.
 - [Validated Image Programming](docs/vip.md) - generating and signing
   digest tables for Secure Boot targets and validating them without
   hardware.
