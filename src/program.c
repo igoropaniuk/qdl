@@ -116,6 +116,12 @@ static int program_load_sparse(struct list_head *ops, struct firehose_op *progra
 		return -1;
 	}
 
+	/*
+	 * The chunks are placed one after the other from the start of the
+	 * partition, whose own op keeps describing all of it.
+	 */
+	start_sector = (unsigned int)strtoul(program->start_sector, NULL, 0);
+
 	for (uint32_t i = 0; i < sparse_header.total_chunks; ++i) {
 		chunk_type = sparse_chunk_header_parse(file, &sparse_header,
 						       &chunk_size,
@@ -158,7 +164,8 @@ static int program_load_sparse(struct list_head *ops, struct firehose_op *progra
 			program_sparse->label = program->label ? strdup(program->label) : NULL;
 			program_sparse->partition = program->partition;
 			program_sparse->sparse = program->sparse;
-			program_sparse->start_sector = strdup(program->start_sector);
+			sprintf(tmp, "%u", start_sector);
+			program_sparse->start_sector = strdup(tmp);
 			program_sparse->last_sector = program->last_sector;
 			program_sparse->is_nand = program->is_nand;
 
@@ -173,11 +180,7 @@ static int program_load_sparse(struct list_head *ops, struct firehose_op *progra
 			list_append(ops, &program_sparse->node);
 		}
 
-		start_sector = (unsigned int)strtoul(program->start_sector, NULL, 0);
 		start_sector += chunk_size / program->sector_size;
-		sprintf(tmp, "%u", start_sector);
-		free((void *)program->start_sector);
-		program->start_sector = strdup(tmp);
 	}
 
 	return 0;
