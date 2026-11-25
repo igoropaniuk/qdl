@@ -9,7 +9,7 @@ common_sources = files(
 # Everything except main(); reused by the qdl binary and the nbdkit plugin.
 lib_sources = files(
   'auto.c', 'cli.c', 'qud.c',
-  'firehose.c',
+  'firehose.c', 'image.c',
   'input_type.c', 'io.c', 'patch.c',
   'program.c', 'programmer.c', 'read.c', 'sahara_config.c', 'sha2.c', 'sim.c', 'ufs.c', 'usb.c',
   'vip.c', 'sparse.c', 'gpt.c', 'flashmap.c', 'json.c', 'contents.c', 'pathbuf.c',
