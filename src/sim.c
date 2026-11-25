@@ -3,6 +3,7 @@
  * Copyright (c) 2025, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 #include <errno.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -10,6 +11,7 @@
 #include <libxml/parser.h>
 #include <libxml/tree.h>
 
+#include "image.h"
 #include "oscompat.h"
 #include "sha2.h"
 #include "sim.h"
@@ -28,6 +30,10 @@
 #define SIM_ACK_RAWMODE \
 	"<?xml version=\"1.0\" encoding=\"UTF-8\" ?>" \
 	"<data><response value=\"ACK\" rawmode=\"true\" /></data>"
+
+#define SIM_NAK \
+	"<?xml version=\"1.0\" encoding=\"UTF-8\" ?>" \
+	"<data><response value=\"NAK\" rawmode=\"false\" /></data>"
 
 #define SIM_CONFIGURE_ACK \
 	"<?xml version=\"1.0\" encoding=\"UTF-8\" ?>" \
@@ -79,8 +85,12 @@ struct qdl_device_sim {
 	struct sim_response *resp_tail;
 
 	enum sim_state state;
-	size_t raw_remaining; /* bytes of raw data left to transfer */
+	uint64_t raw_remaining; /* bytes of raw data left to transfer */
 	bool closed;          /* set after power command to terminate reads fast */
+
+	/* Disk image backing physical partition 0, NULL when nothing is kept */
+	struct qdl_image *image;
+	uint64_t raw_offset;  /* image offset of the next raw data byte */
 
 	/* VIP hash validation */
 	uint8_t vip_hashes[SIM_VIP_MAX_HASHES][SHA256_DIGEST_LENGTH];
@@ -137,6 +147,93 @@ static unsigned int sim_get_uint_attr(xmlNode *node, const char *name)
 
 	ret = (unsigned int)strtoul((char *)val, NULL, 10);
 	xmlFree(val);
+	return ret;
+}
+
+/*
+ * sim_image_locate() - resolve the disk image range a command addresses
+ *
+ * A command without a start_sector, i.e. an <erase> of the whole physical
+ * partition, covers the entire image.
+ *
+ * Returns 0 with @offset and @len set, or -1 with the error reported when
+ * the command cannot be served from the image.
+ */
+static int sim_image_locate(struct qdl_device_sim *qdl_sim, xmlNode *node,
+			    uint64_t *offset, uint64_t *len)
+{
+	unsigned int sector_size;
+	unsigned int partition;
+	xmlChar *start;
+	int ret;
+
+	partition = sim_get_uint_attr(node, "physical_partition_number");
+	if (partition != 0) {
+		ux_err_tag(UX_TAG_SIM, "%s of physical partition %u rejected, "
+			   "the disk image holds partition 0 only\n",
+			   (const char *)node->name, partition);
+		return -1;
+	}
+
+	start = xmlGetProp(node, (xmlChar *)"start_sector");
+	if (!start) {
+		*offset = 0;
+		*len = image_size(qdl_sim->image);
+		return 0;
+	}
+
+	sector_size = sim_get_uint_attr(node, "SECTOR_SIZE_IN_BYTES");
+	ret = image_sector_offset(qdl_sim->image, (const char *)start,
+				  sector_size, offset);
+	xmlFree(start);
+	if (ret < 0)
+		return -1;
+
+	*len = (uint64_t)sim_get_uint_attr(node, "num_partition_sectors") * sector_size;
+	if (*len > image_size(qdl_sim->image) - *offset) {
+		ux_err_tag(UX_TAG_SIM, "%s of %" PRIu64 " bytes at offset %" PRIu64
+			   " does not fit the disk image\n",
+			   (const char *)node->name, *len, *offset);
+		return -1;
+	}
+
+	return 0;
+}
+
+static int sim_image_erase(struct qdl_device_sim *qdl_sim, xmlNode *node)
+{
+	uint64_t offset;
+	uint64_t len;
+
+	if (sim_image_locate(qdl_sim, node, &offset, &len) < 0)
+		return -1;
+
+	return image_zero(qdl_sim->image, offset, len);
+}
+
+static int sim_image_patch(struct qdl_device_sim *qdl_sim, xmlNode *node)
+{
+	xmlChar *start;
+	xmlChar *value;
+	int ret = -1;
+
+	if (sim_get_uint_attr(node, "physical_partition_number") != 0) {
+		ux_err_tag(UX_TAG_SIM, "patch of a physical partition other than 0 rejected\n");
+		return -1;
+	}
+
+	start = xmlGetProp(node, (xmlChar *)"start_sector");
+	value = xmlGetProp(node, (xmlChar *)"value");
+	if (start && value)
+		ret = image_patch(qdl_sim->image,
+				  sim_get_uint_attr(node, "SECTOR_SIZE_IN_BYTES"),
+				  (const char *)start,
+				  sim_get_uint_attr(node, "byte_offset"),
+				  sim_get_uint_attr(node, "size_in_bytes"),
+				  (const char *)value);
+	xmlFree(start);
+	xmlFree(value);
+
 	return ret;
 }
 
@@ -395,10 +492,15 @@ static void sim_vip_check_chunk(struct qdl_device_sim *qdl_sim,
 	qdl_sim->vip_hash_idx++;
 }
 
-static int sim_open(struct qdl_device *qdl __unused,
-		    const char *serial __unused)
+static int sim_open(struct qdl_device *qdl, const char *serial __unused)
 {
-	ux_info("This is a dry-run execution of QDL. No actual flashing has been performed\n");
+	struct qdl_device_sim *qdl_sim = container_of(qdl, struct qdl_device_sim, base);
+
+	if (qdl_sim->image)
+		ux_info("This is a dry-run execution of QDL. Writing a disk image to %s instead of flashing a device\n",
+			image_path(qdl_sim->image));
+	else
+		ux_info("This is a dry-run execution of QDL. No actual flashing has been performed\n");
 	return 0;
 }
 
@@ -452,12 +554,19 @@ static int sim_read(struct qdl_device *qdl, void *buf, size_t len,
 
 	/*
 	 * Queue empty and in raw-out mode: the host has received the
-	 * rawmode=true ACK and is now reading sector data. Serve zeros
-	 * and enqueue the final rawmode=false ACK when all sectors are done.
+	 * rawmode=true ACK and is now reading sector data. Serve the disk
+	 * image content, or zeros without one, and enqueue the final
+	 * rawmode=false ACK when all sectors are done.
 	 */
 	if (qdl_sim->state == SIM_STATE_RAW_OUT) {
-		copy_len = MIN(len, qdl_sim->raw_remaining);
-		memset(buf, 0, copy_len);
+		copy_len = (size_t)MIN((uint64_t)len, qdl_sim->raw_remaining);
+		if (!qdl_sim->image) {
+			memset(buf, 0, copy_len);
+		} else {
+			if (image_read(qdl_sim->image, qdl_sim->raw_offset, buf, copy_len) < 0)
+				return -EIO;
+			qdl_sim->raw_offset += copy_len;
+		}
 		qdl_sim->raw_remaining -= copy_len;
 		if (qdl_sim->raw_remaining == 0) {
 			sim_enqueue(qdl_sim, SIM_ACK);
@@ -492,6 +601,10 @@ static int sim_read(struct qdl_device *qdl, void *buf, size_t len,
  * firehose_read() succeeds. Every subsequent XML command write and every
  * raw-data write is then verified against the stored hashes by
  * sim_vip_check_chunk().
+ *
+ * With a disk image attached, <program>, <erase> and <patch> are applied to
+ * the image and <read> is served from it. A command the image cannot take
+ * is answered with a NAK, failing the run like a real device would.
  */
 static int sim_write(struct qdl_device *qdl, const void *buf, size_t len,
 		     unsigned int timeout __unused)
@@ -499,6 +612,7 @@ static int sim_write(struct qdl_device *qdl, const void *buf, size_t len,
 	struct qdl_device_sim *qdl_sim = container_of(qdl, struct qdl_device_sim, base);
 	unsigned int num_sectors, sector_size;
 	xmlNode *root, *node, *child;
+	uint64_t raw_len;
 	xmlDoc *doc;
 
 	/*
@@ -526,6 +640,14 @@ static int sim_write(struct qdl_device *qdl, const void *buf, size_t len,
 		 * Hash the entire write and verify against the digest table.
 		 */
 		sim_vip_check_chunk(qdl_sim, buf, len);
+
+		if (qdl_sim->image) {
+			size_t count = (size_t)MIN((uint64_t)len, qdl_sim->raw_remaining);
+
+			if (image_write(qdl_sim->image, qdl_sim->raw_offset, buf, count) < 0)
+				return -EIO;
+			qdl_sim->raw_offset += count;
+		}
 
 		if (len >= qdl_sim->raw_remaining) {
 			sim_enqueue(qdl_sim, SIM_ACK);
@@ -577,26 +699,44 @@ static int sim_write(struct qdl_device *qdl, const void *buf, size_t len,
 	} else if (xmlStrcmp(child->name, (xmlChar *)"program") == 0) {
 		num_sectors = sim_get_uint_attr(child, "num_partition_sectors");
 		sector_size = sim_get_uint_attr(child, "SECTOR_SIZE_IN_BYTES");
+		raw_len = (uint64_t)num_sectors * sector_size;
 		sim_enqueue_log(qdl_sim, "program");
+		if (qdl_sim->image &&
+		    sim_image_locate(qdl_sim, child, &qdl_sim->raw_offset, &raw_len) < 0) {
+			sim_enqueue(qdl_sim, SIM_NAK);
+			goto out;
+		}
 		sim_enqueue(qdl_sim, SIM_ACK_RAWMODE);
 		qdl_sim->state = SIM_STATE_RAW_IN;
-		qdl_sim->raw_remaining = (size_t)num_sectors * sector_size;
+		qdl_sim->raw_remaining = raw_len;
 
 	} else if (xmlStrcmp(child->name, (xmlChar *)"read") == 0) {
 		num_sectors = sim_get_uint_attr(child, "num_partition_sectors");
 		sector_size = sim_get_uint_attr(child, "SECTOR_SIZE_IN_BYTES");
+		raw_len = (uint64_t)num_sectors * sector_size;
 		sim_enqueue_log(qdl_sim, "read");
+		if (qdl_sim->image &&
+		    sim_image_locate(qdl_sim, child, &qdl_sim->raw_offset, &raw_len) < 0) {
+			sim_enqueue(qdl_sim, SIM_NAK);
+			goto out;
+		}
 		sim_enqueue(qdl_sim, SIM_ACK_RAWMODE);
 		qdl_sim->state = SIM_STATE_RAW_OUT;
-		qdl_sim->raw_remaining = (size_t)num_sectors * sector_size;
+		qdl_sim->raw_remaining = raw_len;
 
 	} else if (xmlStrcmp(child->name, (xmlChar *)"erase") == 0) {
 		sim_enqueue_log(qdl_sim, "erase");
-		sim_enqueue(qdl_sim, SIM_ACK);
+		if (qdl_sim->image && sim_image_erase(qdl_sim, child) < 0)
+			sim_enqueue(qdl_sim, SIM_NAK);
+		else
+			sim_enqueue(qdl_sim, SIM_ACK);
 
 	} else if (xmlStrcmp(child->name, (xmlChar *)"patch") == 0) {
 		sim_enqueue_log(qdl_sim, "patch");
-		sim_enqueue(qdl_sim, SIM_ACK);
+		if (qdl_sim->image && sim_image_patch(qdl_sim, child) < 0)
+			sim_enqueue(qdl_sim, SIM_NAK);
+		else
+			sim_enqueue(qdl_sim, SIM_ACK);
 
 	} else if (xmlStrcmp(child->name, (xmlChar *)"setbootablestoragedrive") == 0) {
 		sim_enqueue_log(qdl_sim, "setbootablestoragedrive");
@@ -685,6 +825,25 @@ bool sim_set_digest_generation(bool create_digests, struct qdl_device *qdl,
 
 	qdl_sim->create_digests = create_digests;
 	qdl_sim->vip_gen = vip_gen;
+
+	return true;
+}
+
+/*
+ * sim_set_image() - back the simulated storage with a disk image
+ *
+ * The image stays owned by the caller, who must keep it open for as long
+ * as the device is in use.
+ */
+bool sim_set_image(struct qdl_device *qdl, struct qdl_image *image)
+{
+	struct qdl_device_sim *qdl_sim;
+
+	if (qdl->dev_type != QDL_DEVICE_SIM)
+		return false;
+
+	qdl_sim = container_of(qdl, struct qdl_device_sim, base);
+	qdl_sim->image = image;
 
 	return true;
 }
