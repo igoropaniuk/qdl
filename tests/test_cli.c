@@ -226,6 +226,33 @@ static void test_dry_run_and_skipblock(void **state)
 	assert_int_equal(o.dev_type, QDL_DEVICE_SIM);
 }
 
+static void test_disk_image(void **state)
+{
+	static const char *const image[] = {
+		"qdl", "--disk-image", "disk.img", "--backend", "usb", "prog", "f", NULL
+	};
+	static const char *const bytes[] = {
+		"qdl", "--disk-image=disk.img", "--disk-size=4096", "prog", "f", NULL
+	};
+	static const char *const suffix[] = {
+		"qdl", "--disk-image=disk.img", "--disk-size", "16G", "prog", "f", NULL
+	};
+	struct qdl_opts o;
+	(void)state;
+
+	/* --disk-image enforces dry-run, like --create-digests does. */
+	assert_int_equal(parse(&o, image), QDL_ARGS_OK);
+	assert_string_equal(o.image_path, "disk.img");
+	assert_int_equal(o.image_size, 0);
+	assert_int_equal(o.dev_type, QDL_DEVICE_SIM);
+
+	assert_int_equal(parse(&o, bytes), QDL_ARGS_OK);
+	assert_int_equal(o.image_size, 4096);
+
+	assert_int_equal(parse(&o, suffix), QDL_ARGS_OK);
+	assert_true(o.image_size == 16ULL << 30);
+}
+
 static void test_flags_and_values(void **state)
 {
 	static const char *const argv[] = {
@@ -386,6 +413,7 @@ int main(void)
 		cmocka_unit_test(test_defaults),
 		cmocka_unit_test(test_storage_and_backend),
 		cmocka_unit_test(test_dry_run_and_skipblock),
+		cmocka_unit_test(test_disk_image),
 		cmocka_unit_test(test_flags_and_values),
 		cmocka_unit_test(test_help_version_and_usage),
 		cmocka_unit_test(test_quiet),

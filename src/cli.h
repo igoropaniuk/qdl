@@ -6,6 +6,7 @@
 #define __CLI_H__
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "list.h"
@@ -15,6 +16,8 @@ enum {
 	OPT_BACKEND = 0x100,
 	OPT_SKIPBLOCK,
 	OPT_SERIAL,
+	OPT_DISK_IMAGE,
+	OPT_DISK_SIZE,
 };
 
 /* Command-line options and flags for a flashing run. */
@@ -26,6 +29,8 @@ struct qdl_opts {
 	char *serial;
 	const char *vip_generate_dir;
 	const char *vip_table_path;
+	const char *image_path;
+	uint64_t image_size;
 	long out_chunk_size;
 	unsigned int slot;
 	bool finalize_provisioning;

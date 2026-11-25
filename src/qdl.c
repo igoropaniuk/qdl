@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <inttypes.h>
 #include <libgen.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -26,9 +27,11 @@
 #include "file.h"
 #include "firehose.h"
 #include "flashmap.h"
+#include "image.h"
 #include "patch.h"
 #include "pathbuf.h"
 #include "program.h"
+#include "sim.h"
 #include "ufs.h"
 #include "oscompat.h"
 #include "vip.h"
@@ -815,12 +818,90 @@ static int qdl_build_op_list(int argc, char **argv, int start,
 	return 0;
 }
 
+/*
+ * Create the disk image a --disk-image dry run programs instead of a device
+ * and attach it to the simulator. The image is one flat block device, so
+ * anything that needs more than physical partition 0 is refused up front.
+ * Returns NULL with the error already reported on failure.
+ */
+static struct qdl_image *qdl_image_setup(struct qdl_device *qdl, struct qdl_opts *opts,
+					 int argc, char **argv,
+					 struct list_head *ops,
+					 struct sahara_image *images,
+					 struct ufs_provisioning *ufs)
+{
+	struct qdl_image *image;
+	unsigned int sector_size;
+	uint64_t size;
+	int i;
+
+	/*
+	 * The image replaces its file once the run is over, which must not be
+	 * one of the inputs: the programmer, the XML or JSON descriptions, an
+	 * installer package or a raw write's binary, all of which are named on
+	 * the command line or loaded as a programmer. What they refer to is
+	 * checked as part of the plan below.
+	 */
+	for (i = optind; i < argc; i++) {
+		if (image_same_file(argv[i], opts->image_path))
+			goto err_alias;
+	}
+	for (i = 0; i < MAPPING_SZ; i++) {
+		if (images[i].name && image_same_file(images[i].name, opts->image_path))
+			goto err_alias;
+	}
+
+	if (ufs_need_provisioning(ufs)) {
+		ux_err("--disk-image cannot be combined with UFS provisioning\n");
+		return NULL;
+	}
+
+	if (image_plan(ops, opts->image_path, qdl->sector_size, &sector_size, &size) < 0)
+		return NULL;
+
+	if (opts->image_size) {
+		if (opts->image_size % sector_size) {
+			ux_err("--disk-size must be a multiple of the %u byte sector size\n",
+			       sector_size);
+			return NULL;
+		}
+
+		if (opts->image_size < size) {
+			ux_err("--disk-size is too small, at least %" PRIu64 " bytes are needed\n",
+			       size);
+			return NULL;
+		}
+
+		size = opts->image_size;
+	}
+
+	if (!size) {
+		ux_err("nothing is programmed to size the disk image by, use --disk-size\n");
+		return NULL;
+	}
+
+	image = image_create(opts->image_path, size);
+	if (!image)
+		return NULL;
+
+	/* Commands that carry no sector size follow the one of the image */
+	qdl->sector_size = sector_size;
+	sim_set_image(qdl, image);
+
+	return image;
+
+err_alias:
+	ux_err("%s is both the disk image and an input of the run\n", opts->image_path);
+	return NULL;
+}
+
 static int qdl_flash(int argc, char **argv)
 {
 	struct sahara_image sahara_images[MAPPING_SZ] = {};
 	struct list_head firehose_ops = LIST_INIT(firehose_ops);
 	struct ufs_provisioning ufs;
 	struct qdl_device *qdl = NULL;
+	struct qdl_image *image = NULL;
 	struct qdl_opts opts;
 	int ret;
 
@@ -887,6 +968,15 @@ static int qdl_flash(int argc, char **argv)
 			goto out_cleanup;
 	}
 
+	if (opts.image_path) {
+		image = qdl_image_setup(qdl, &opts, argc, argv, &firehose_ops,
+					sahara_images, &ufs);
+		if (!image) {
+			ret = -1;
+			goto out_cleanup;
+		}
+	}
+
 	ret = qdl_open(qdl, opts.serial);
 	if (ret)
 		goto out_cleanup;
@@ -912,6 +1002,18 @@ out_cleanup:
 		qdl_close(qdl);
 	}
 
+	if (image) {
+		uint64_t size = image_size(image);
+
+		/* Only a complete image takes the place of the output file */
+		sim_set_image(qdl, NULL);
+		if (image_close(image, !ret) < 0)
+			ret = -1;
+		else if (!ret)
+			ux_info("disk image %s created, %" PRIu64 " bytes\n",
+				opts.image_path, size);
+	}
+
 	sahara_images_free(sahara_images, MAPPING_SZ);
 
 	firehose_free_ops(&firehose_ops);
@@ -930,8 +1032,59 @@ out_cleanup:
 	return !!ret;
 }
 
+/* Subcommands with a parser of their own, which never produce a disk image */
+static bool qdl_is_standalone_cmd(const char *arg)
+{
+	static const char * const cmds[] = {
+		"list", "ramdump", "chipinfo", "reset", "ks",
+		"create-zip", "create-sahara-archive",
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(cmds); i++) {
+		if (!strcmp(arg, cmds[i]))
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * Whether @arg is --disk-image or --disk-size, in any of the spellings
+ * getopt_long() takes: abbreviated as long as it stays distinct from the
+ * other options, and with or without an "=" attached @has_value.
+ */
+static bool qdl_is_disk_image_opt(const char *arg, bool *has_value)
+{
+	static const char * const names[] = { "disk-image", "disk-size" };
+	const char *name;
+	size_t len;
+	size_t i;
+
+	if (strncmp(arg, "--", 2))
+		return false;
+
+	name = arg + 2;
+	len = strcspn(name, "=");
+
+	/* "--d" could still be --debug or --dry-run */
+	if (len < 2)
+		return false;
+
+	for (i = 0; i < ARRAY_SIZE(names); i++) {
+		if (len <= strlen(names[i]) && !strncmp(name, names[i], len)) {
+			*has_value = name[len] == '=';
+			return true;
+		}
+	}
+
+	return false;
+}
+
 int main(int argc, char **argv)
 {
+	bool disk_image = false;
+	bool has_value;
 	int i;
 
 	/* execve() allows an empty argv, where argv[0] is already NULL */
@@ -944,6 +1097,23 @@ int main(int argc, char **argv)
 		return 1;
 
 	for (i = 1; i < argc; i++) {
+		/*
+		 * A disk image is only produced by a flashing run. Step over
+		 * the operand of its options, which might read like a
+		 * subcommand, and keep the standalone subcommands from
+		 * silently dropping them and going for a device instead.
+		 */
+		if (qdl_is_disk_image_opt(argv[i], &has_value)) {
+			disk_image = true;
+			if (!has_value)
+				i++;
+			continue;
+		}
+		if (disk_image && qdl_is_standalone_cmd(argv[i])) {
+			ux_err("--disk-image cannot be used with the \"%s\" subcommand\n", argv[i]);
+			return 1;
+		}
+
 		if (!strcmp(argv[i], "list"))
 			return qdl_list(stdout);
 		if (!strcmp(argv[i], "ramdump"))

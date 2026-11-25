@@ -3,8 +3,10 @@
  * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 /* Command-line front-end helpers: usage text and flashing-run options. */
+#include <errno.h>
 #include <getopt.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +46,11 @@ void print_usage(FILE *out)
 	usage_opt(out, "     ", "--color[=W]", "\t\tColorize output W: <auto|always|never> (default: auto)");
 	usage_opt(out, " ", "-v, --version", "\t\t\tPrint the current version and exit");
 	usage_opt(out, " ", "-n, --dry-run", "\t\t\tDry run execution, no device reading or flashing");
+	usage_opt(out, "     ", "--disk-image=T",
+		  "\t\tDry run writing physical partition 0 to the disk image file T");
+	usage_opt(out, "     ", "--disk-size=T",
+		  "\t\tSize T of the disk image in bytes, or with a K, M or G suffix");
+	fprintf(out, "                 \t\t(default: smallest size that fits the programmed data)\n");
 	usage_opt(out, " ", "-f, --allow-missing", "\t\tAllow skipping of missing files during flashing");
 	usage_opt(out, " ", "-s, --storage=T", "\t\tSet target storage type T: <emmc|nand|nvme|spinor|ufs>");
 	usage_opt(out, " ", "-l, --finalize-provisioning", "\tProvision the target storage");
@@ -147,6 +154,47 @@ void print_version(void)
 	fprintf(stdout, "%s version %s\n", ux_progname(), VERSION);
 }
 
+/* Parse a non-zero byte count with an optional binary K, M or G suffix */
+static int parse_size(const char *arg, uint64_t *size)
+{
+	unsigned long long value;
+	unsigned int shift = 0;
+	char *end;
+
+	if (arg[0] < '0' || arg[0] > '9')
+		return -1;
+
+	errno = 0;
+	value = strtoull(arg, &end, 10);
+	if (errno || !value)
+		return -1;
+
+	switch (end[0]) {
+	case 'G':
+		shift = 30;
+		break;
+	case 'M':
+		shift = 20;
+		break;
+	case 'K':
+		shift = 10;
+		break;
+	case '\0':
+		break;
+	default:
+		return -1;
+	}
+
+	if (shift && end[1] != '\0')
+		return -1;
+	if (value > UINT64_MAX >> shift)
+		return -1;
+
+	*size = (uint64_t)value << shift;
+
+	return 0;
+}
+
 /*
  * Parse the flashing options into @opts and leave optind pointing at the
  * first positional argument. Fatal value errors (unknown storage/backend/
@@ -173,6 +221,8 @@ int qdl_parse_args(int argc, char **argv, struct qdl_opts *opts)
 		{"quiet", no_argument, 0, 'q'},
 		{"backend", required_argument, 0, OPT_BACKEND},
 		{"skipblock", required_argument, 0, OPT_SKIPBLOCK},
+		{"disk-image", required_argument, 0, OPT_DISK_IMAGE},
+		{"disk-size", required_argument, 0, OPT_DISK_SIZE},
 		{"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}
 	};
@@ -262,6 +312,16 @@ int qdl_parse_args(int argc, char **argv, struct qdl_opts *opts)
 				ux_diex(1, "unknown --skipblock mode \"%s\", valid options are none and sha256",
 					optarg);
 			break;
+		case OPT_DISK_IMAGE:
+			opts->image_path = optarg;
+			/* the image is produced by the simulated device */
+			opts->dev_type = QDL_DEVICE_SIM;
+			break;
+		case OPT_DISK_SIZE:
+			if (parse_size(optarg, &opts->image_size) < 0)
+				ux_diex(1, "invalid --disk-size \"%s\" (expected <bytes>[K|M|G])",
+					optarg);
+			break;
 		case 'h':
 			print_usage(stdout);
 			return QDL_ARGS_DONE;
@@ -270,6 +330,9 @@ int qdl_parse_args(int argc, char **argv, struct qdl_opts *opts)
 			return QDL_ARGS_ERROR;
 		}
 	}
+
+	if (opts->image_size && !opts->image_path)
+		ux_diex(1, "--disk-size requires --disk-image");
 
 	/* at least 2 non optional args required */
 	if ((optind + 2) > argc) {
